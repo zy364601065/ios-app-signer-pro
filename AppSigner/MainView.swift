@@ -360,7 +360,7 @@ class MainView: NSView, URLSessionDataDelegate, URLSessionDelegate, URLSessionDo
         }
     }
     
-    @objc func recursiveDirectorySearch(_ path: String, extensions: [String], found: ((_ file: String) -> Void)){
+    @objc func recursiveDirectorySearch(_ path: String, extensions: [String], found: ((_ file: String) -> Void), includeMachO: Bool = true){
         
         if let files = try? fileManager.contentsOfDirectory(atPath: path) {
             var isDirectory: ObjCBool = true
@@ -369,7 +369,7 @@ class MainView: NSView, URLSessionDataDelegate, URLSessionDelegate, URLSessionDo
                 let currentFile = path.stringByAppendingPathComponent(file)
                 fileManager.fileExists(atPath: currentFile, isDirectory: &isDirectory)
                 if isDirectory.boolValue {
-                    recursiveDirectorySearch(currentFile, extensions: extensions, found: found)
+                    recursiveDirectorySearch(currentFile, extensions: extensions, found: found, includeMachO: includeMachO)
                 }
                 if extensions.contains(file.pathExtension) {
                     if file.pathExtension != "" || file == "IpaSecurityRestriction" {
@@ -377,7 +377,7 @@ class MainView: NSView, URLSessionDataDelegate, URLSessionDelegate, URLSessionDo
                     } else {
                         //NSLog("couldnt find: %@", file)
                     }
-                } else if isDirectory.boolValue == false && checkMachOFile(currentFile) {
+                } else if includeMachO && isDirectory.boolValue == false && checkMachOFile(currentFile) {
                     found(currentFile)
                 }
                 
@@ -406,10 +406,16 @@ class MainView: NSView, URLSessionDataDelegate, URLSessionDelegate, URLSessionDo
     }
     
     func unzip(_ inputFile: String, outputPath: String)->AppSignerTaskOutput {
-        return Process().execute(unzipPath, workingDirectory: nil, arguments: ["-q",inputFile,"-d",outputPath])
+        // 确保路径正确处理中文
+        let inputURL = URL(fileURLWithPath: inputFile)
+        let outputURL = URL(fileURLWithPath: outputPath)
+        return Process().execute(unzipPath, workingDirectory: nil, arguments: ["-q", inputURL.path, "-d", outputURL.path])
     }
     func zip(_ inputPath: String, outputFile: String)->AppSignerTaskOutput {
-        return Process().execute(zipPath, workingDirectory: inputPath, arguments: ["-qry", outputFile, "."])
+        // 确保路径正确处理中文
+        let inputURL = URL(fileURLWithPath: inputPath)
+        let outputURL = URL(fileURLWithPath: outputFile)
+        return Process().execute(zipPath, workingDirectory: inputURL.path, arguments: ["-qry", outputURL.path, "."])
     }
     
     @objc func cleanup(_ tempFolder: String){
@@ -503,9 +509,13 @@ class MainView: NSView, URLSessionDataDelegate, URLSessionDelegate, URLSessionDo
 
         var arguments = ["-f", "-s", certificate, "--generate-entitlement-der"]
         if needEntitlements {
-            arguments += ["--entitlements", entitlements!]
+            // 确保 entitlements 路径正确处理中文
+            let entitlementsURL = URL(fileURLWithPath: entitlements!)
+            arguments += ["--entitlements", entitlementsURL.path]
         }
-        arguments.append(filePath)
+        // 确保文件路径正确处理中文
+        let filePathURL = URL(fileURLWithPath: filePath)
+        arguments.append(filePathURL.path)
 
         let codesignTask = Process().execute(codesignPath, workingDirectory: nil, arguments: arguments)
         if codesignTask.status != 0 {
@@ -931,7 +941,9 @@ class MainView: NSView, URLSessionDataDelegate, URLSessionDelegate, URLSessionDo
 
                             let appexPlist = appexFile.stringByAppendingPathComponent("Info.plist")
                             if let appexBundleID = getPlistKey(appexPlist, keyName: "CFBundleIdentifier"){
-                                let newAppexID = "\(newApplicationID)\(appexBundleID.substring(from: oldAppID.endIndex))"
+                                // 使用更安全的方法来处理字符串，支持包含中文的情况
+                                let suffix = appexBundleID.hasPrefix(oldAppID) ? String(appexBundleID.dropFirst(oldAppID.count)) : ""
+                                let newAppexID = "\(newApplicationID)\(suffix)"
                                 setStatus("Changing \(appexFile) id to \(newAppexID)")
                                 _ = setPlistKey(appexPlist, keyName: "CFBundleIdentifier", value: newAppexID)
                             }
@@ -1006,7 +1018,14 @@ class MainView: NSView, URLSessionDataDelegate, URLSessionDelegate, URLSessionDo
                     })()
                     
                     func shortName(_ file: String, payloadDirectory: String)->String{
-                        return file.substring(from: payloadDirectory.endIndex)
+                        // 使用 URL 来正确处理包含中文的路径
+                        let fileURL = URL(fileURLWithPath: file)
+                        let payloadURL = URL(fileURLWithPath: payloadDirectory)
+                        if fileURL.path.hasPrefix(payloadURL.path) {
+                            let relativePath = String(fileURL.path.dropFirst(payloadURL.path.count))
+                            return relativePath.hasPrefix("/") ? String(relativePath.dropFirst()) : relativePath
+                        }
+                        return fileURL.lastPathComponent
                     }
                     
                     func beforeFunc(_ file: String, certificate: String, entitlements: String?){
@@ -1039,13 +1058,13 @@ class MainView: NSView, URLSessionDataDelegate, URLSessionDelegate, URLSessionDo
                         Log.write("Error extracting \(shortName)")
                         return
                     }
-                    recursiveDirectorySearch(currentEggPath, extensions: ["egg"], found: signEgg)
+                    recursiveDirectorySearch(currentEggPath, extensions: ["egg"], found: signEgg, includeMachO: false)
                     recursiveDirectorySearch(currentEggPath, extensions: signableExtensions, found: eggSigningFunction)
                     setStatus("Compressing \(shortName)")
                     _ = self.zip(currentEggPath, outputFile: eggFile)                    
                 }
                 
-                recursiveDirectorySearch(appBundlePath, extensions: ["egg"], found: signEgg)
+                recursiveDirectorySearch(appBundlePath, extensions: ["egg"], found: signEgg, includeMachO: false)
                 
                 //MARK: Codesigning - App
                 let signingFunction = generateFileSignFunc(payloadDirectory, entitlementsPath: entitlementsPlist, signingCertificate: signingCertificate!)
